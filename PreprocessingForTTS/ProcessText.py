@@ -49,6 +49,7 @@ class TextFrontend:
             self.clean_lang = "es"
             self.g2p_lang = "es"
             self.expand_abbrevations = lambda x: x
+            self.lid = LanguageIdentification('spa-eng')
             if not silent:
                 print("Created a Spanish Text-Frontend")
         else:
@@ -73,8 +74,8 @@ class TextFrontend:
 
         # code switching
         if self.use_codeswitching:
-            lid = LanguageIdentification('spa-eng')
-            cs_dicts = lid.identify(utt)
+
+            cs_dicts = self.lid.identify(utt)
 
             # convert wordpiece tokens back to words
             id_to_del = []
@@ -88,7 +89,7 @@ class TextFrontend:
 
             for idx in sorted(id_to_del, reverse=True):
                 del cs_dicts[idx]
-            print('results after deltetions: ')
+            # print('results after deletions: ')
 
             phones = ""
             for entry in cs_dicts:
@@ -160,7 +161,7 @@ class TextFrontend:
         if not return_string:
             return torch.stack(tensors, 0)
         else:
-            return phones
+            return phones + "#"
 
     def phones_to_tensor(self, phones):
         phones = phones.replace("_SIL_", "~")
