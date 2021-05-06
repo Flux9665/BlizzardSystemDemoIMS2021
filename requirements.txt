@@ -1,0 +1,15 @@
+librosa
+matplotlib
+pyloudnorm
+SoundFile
+torch
+torchaudio
+torchviz
+numpy
+phonemizer
+clean-text
+unidecode
+pyworld
+torch-complex
+sounddevice
+tqdm
