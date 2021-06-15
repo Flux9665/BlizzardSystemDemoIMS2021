@@ -1,8 +1,8 @@
-import os
 import re
 import sys
 from collections import defaultdict
 
+import numpy
 import phonemizer
 import torch
 from cleantext import clean
@@ -22,7 +22,8 @@ class TextFrontend:
                  # with such information would help such systems.
                  use_lexical_stress=False,
                  use_codeswitching=False,
-                 path_to_panphon_table="PreprocessingForTTS/ipa_vector_lookup.csv",
+                 path_to_phoneme_list="PreprocessingForTTS/ipa_list.txt",
+                 allow_unknown=False,
                  silent=True):
         """
         Mostly preparing ID lookups
@@ -31,30 +32,101 @@ class TextFrontend:
         self.use_explicit_eos = use_explicit_eos
         self.use_prosody = use_prosody
         self.use_stress = use_lexical_stress
+        self.allow_unknown = allow_unknown
         self.use_codeswitching = use_codeswitching
-        self.ipa_to_vector = defaultdict()
-        self.default_vector = 133
-        with open(path_to_panphon_table, encoding='utf8') as f:
-            features = f.read()
-        features_list = features.split("\n")
-        for index in range(1, len(features_list)):
-            line_list = features_list[index].split(",")
-            self.ipa_to_vector[line_list[0]] = index
+        if allow_unknown:
+            self.ipa_to_vector = defaultdict()
+            self.default_vector = 165
+        else:
+            self.ipa_to_vector = dict()
+        with open(path_to_phoneme_list, "r", encoding='utf8') as f:
+            phonemes = f.read()
+            # using https://github.com/espeak-ng/espeak-ng/blob/master/docs/phonemes.md
+        phoneme_list = phonemes.split("\n")
+        for index in range(1, len(phoneme_list)):
+            self.ipa_to_vector[phoneme_list[index]] = index
             # note: Index 0 is unused, so it can be used for padding as is convention.
-            #       Index 1 is reserved for EOS, if you want to use explicit EOS.
-            #       Index 133 is used for unknown characters
-            #       Index 12 is used for pauses (heuristically)
-            #       Index 132 is used for begin_of_sentence
+            #       Index 1 is reserved for end_of_utterance
+            #       Index 2 is reserved for begin of sentence token
+            #       Index 13 is used for pauses (heuristically)
+
+        # The point of having the phonemes in a separate file is to ensure reproducibility.
+        # The line of the phoneme is the ID of the phoneme, so you can have multiple such
+        # files and always just supply the one during inference which you used during training.
+
         if language == "es":
             self.clean_lang = "es"
             self.g2p_lang = "es"
             self.expand_abbrevations = lambda x: x
-            self.lid = LanguageIdentification('spa-eng')
+            if self.use_codeswitching:
+                self.lid = LanguageIdentification('spa-eng')
+                self.important_en = ['gym', 'red', 'Bye', 'bye', 'Exmouth', 'Derain', 'set', 'Oxhead', 'Guy', 'VIP', 'cutre', 'confort', 'Midge', 'yen', 'USB', 'aftersun']
+                with open('PreprocessingForTTS/english.city.names.txt', "r", encoding='utf8') as f:
+                    self.en_cities = f.read().splitlines()
             if not silent:
                 print("Created a Spanish Text-Frontend")
         else:
             print("Language not supported yet")
             sys.exit()
+
+    def map_phones(self, phones):
+        phones = phones.replace("ɔɪ", "oɪ").replace("oʊ", "o")
+        phones = phones.replace("ɚɹ", "eɾ").replace("ɚ", "eɾ").replace("ɜ", "ɛɾ")
+        phones = phones.replace("dʒ", "tʃ")
+        phones = phones.replace("ᵻ", "i").replace("æ", "a").replace("ɔ", "o").replace("ɑ", "o").replace("ɐ", "a")
+        phones = phones.replace("ə", "e").replace("ʌ", "a")
+
+        phones = re.sub(r"(?<!a|o|e)ɪ", "i", phones)
+        phones = re.sub(r"(?<!a)ʊ", "u", phones)
+        phones = re.sub(r"(?<!e|ɛ)ɾ", "t", phones)
+
+        phones = phones.replace("g", "ɣ").replace("v", "β").replace("z", "s").replace("h", "x")
+        phones = phones.replace("ɹ", "ɾ").replace("ʒ", "ʃ")
+        return phones
+
+        # only use this method in case the other one doesn't work as expected
+
+    def postprocess_codeswitch_simple(self, chunk):
+        lang = chunk['lang']
+        seq = chunk['word'].replace(' ##', '')
+        if lang == 'es':
+            seq = seq.replace(" d ' ", " d'").replace(" ' s", "'s")
+        if lang == 'en-us':
+            seq = seq.replace(" ' ll", "'ll").replace(" ' s", "'s").replace(" ' ve", "'ve").replace(" ' d", "'d")
+        chunk['word'] = seq
+        return chunk
+
+    def postprocess_codeswitch(self, chunks):
+        cleaned_chunks = [None] * len(chunks)
+        ptr = 0
+        for chunk in chunks:
+            lang = chunk['lang']
+            seq = chunk['word'].replace(' ##', '')
+            # ∏print('ptr:\t', ptr, '\tseq:\t', seq, '\tlang:\t', lang)
+            if lang == 'es':
+                seq = seq.replace(" d ' ", " d'").replace(" ' s", "'s")
+            if lang == 'en-us':
+                seq = seq.replace(" ' ll", "'ll").replace(" ' s", "'s").replace(" ' ve", "'ve").replace(" ' d", "'d")
+                if seq.count(" ") < 1:  # if sequence is shorter than 2 words, check if it really is english
+                    if seq in self.important_en or seq in self.en_cities or "k" in seq or "w" in seq or "sh" in seq or re.search(r"^[Ss][tpk]", seq) or re.search(r"tions?$",
+                                                                                                                                                                  seq) or re.search(
+                        r"ings?$", seq):
+                        pass
+                    else:
+                        lang = 'es'
+            if not cleaned_chunks[ptr]:
+                cleaned_chunks[ptr] = chunk
+                cleaned_chunks[ptr]['word'] = seq
+                cleaned_chunks[ptr]['lang'] = lang
+            elif lang == cleaned_chunks[ptr]['lang']:
+                cleaned_chunks[ptr]['word'] += " " + seq
+            else:
+                ptr += 1
+                cleaned_chunks[ptr] = chunk
+                cleaned_chunks[ptr]['word'] = seq
+                cleaned_chunks[ptr]['lang'] = lang
+        cleaned_chunks = list(filter(None, cleaned_chunks))
+        return cleaned_chunks
 
     def string_to_tensor(self, text, view=False, return_string=False):
         """
@@ -67,66 +139,83 @@ class TextFrontend:
         utt = clean(text, fix_unicode=True, to_ascii=False, lower=False, lang=self.clean_lang)
         self.expand_abbrevations(utt)
 
-        # if an aligner has produced silence tokens before, turn
-        # them into silence markers now so that they survive the
-        # phonemizer:
-        utt = utt.replace("_SIL_", "~")
-
-        # code switching
+        # phonemize with code switching
         if self.use_codeswitching:
-
             cs_dicts = self.lid.identify(utt)
-
-            # convert wordpiece tokens back to words
-            id_to_del = []
+            chunks = []
             for i in range(len(cs_dicts)):
                 word = cs_dicts[i]['word']
-                if word.startswith('##'):
-                    id_to_del.append(i)
-                    cs_dicts[i - 1]['word'] += word.replace('##', '')
-                else:
-                    continue
-
-            for idx in sorted(id_to_del, reverse=True):
-                del cs_dicts[idx]
-            # print('results after deletions: ')
-
-            phones = ""
-            for entry in cs_dicts:
-                word = entry['word']
-                cs_lang = entry['entity']
-                if cs_lang == 'spa':
+                cs_lang = cs_dicts[i]['entity']
+                # print(word, "\t", cs_lang)
+                if cs_lang == 'spa' or cs_lang == 'other':
                     g2p_lang = 'es'
                 elif cs_lang == 'en':
                     g2p_lang = 'en-us'
+                elif cs_lang == 'ne':
+                    if word in self.en_cities:
+                        g2p_lang = 'en-us'
+                    else:
+                        g2p_lang = 'es'
                 else:
-                    g2p_lang = 'en-us'  # try en as default, since most Named Entities in dev set should be pronounced in English
+                    g2p_lang = 'es'
 
-                # phonemize word by word
-                phones += phonemizer.phonemize(word,
-                                               language_switch='remove-flags',
-                                               backend="espeak",
-                                               language=g2p_lang,
-                                               preserve_punctuation=True,
-                                               strip=True,
-                                               punctuation_marks=';:,.!?¡¿—…"«»“”~',
-                                               with_stress=self.use_stress).replace(";", ",") \
+                if i == 0:
+                    current_lang = g2p_lang
+                    current_chunk = word
+                    continue
+
+                if word.startswith('##') or word.startswith("'") or word == "s":
+                    g2p_lang = current_lang  # wordpieces of one word should all have the same language
+
+                if g2p_lang == current_lang:
+                    current_chunk += " " + word
+                else:
+                    chunks.append({'word': current_chunk, 'lang': current_lang})
+                    current_chunk = word
+                    current_lang = g2p_lang
+            chunks.append({'word': current_chunk, 'lang': current_lang})
+            chunks = self.postprocess_codeswitch(chunks)
+
+            # phonemize chunks
+            phones_chunks = []
+            for chunk in chunks:
+                # chunk = self.postprocess_codeswitch_simple(chunk) # uncomment this line if postprocessing doesn't work
+                seq = chunk['word']
+                g2p_lang = chunk['lang']
+                # print('seq: ', seq, '\t', g2p_lang)
+                phones_chunk = phonemizer.phonemize(seq,
+                                                    language_switch='remove-flags',
+                                                    backend="espeak",
+                                                    language=g2p_lang,
+                                                    preserve_punctuation=True,
+                                                    strip=True,
+                                                    punctuation_marks=';:,.!?¡¿—…"«»“”~/',
+                                                    with_stress=self.use_stress).replace(";", ",") \
                     .replace(":", ",").replace('"', ",").replace("-", ",").replace("-", ",").replace("\n", " ") \
-                    .replace("\t", " ").replace("¡", "").replace("¿", "").replace(",", "~")
-            phones = re.sub("~+", "~", phones)
+                    .replace("\t", " ").replace("/", " ").replace("¡", "").replace("¿", "").replace(",", "~")
 
+                if g2p_lang == 'en-us':
+                    phones_chunk = self.map_phones(phones_chunk)
+                if len(phones_chunk.split()) > 4:
+                    phones_chunks.append("~" + phones_chunk + "~")
+                else:
+                    phones_chunks.append(phones_chunk)
+
+            phones = ' '.join(phones_chunks)
+            phones = phones.replace(" ~", "~").replace(" .", ".").replace(" !", "!").replace(" ?", "?").lstrip()
+            phones = re.sub("~+", "~", phones)
         else:
-            # phonemize
+            # just phonemize without code switching
             phones = phonemizer.phonemize(utt,
                                           language_switch='remove-flags',
                                           backend="espeak",
                                           language=self.g2p_lang,
                                           preserve_punctuation=True,
                                           strip=True,
-                                          punctuation_marks=';:,.!?¡¿—…"«»“”~',
+                                          punctuation_marks=';:,.!?¡¿—…"«»“”~/',
                                           with_stress=self.use_stress).replace(";", ",") \
                 .replace(":", ",").replace('"', ",").replace("-", ",").replace("-", ",").replace("\n", " ") \
-                .replace("\t", " ").replace("¡", "").replace("¿", "").replace(",", "~")
+                .replace("\t", " ").replace("/", " ").replace("¡", "").replace("¿", "").replace(",", "~")
             phones = re.sub("~+", "~", phones)
 
         if not self.use_prosody:
@@ -141,85 +230,102 @@ class TextFrontend:
 
         phones = "+" + phones
 
+        # I have no idea how this happened, but the synthesis just cannot pronounce ɔ.
+        # Seems like it did not occur in the training data, maybe aligner removed it? As hacky fix, use o instead.
+        phones = phones.replace("ɔ", "o") + "~"
+        # phones = self.map_phones(phones)
+
         if view:
             print("Phonemes: \n{}\n".format(phones))
 
-        tensors = list()
         phones_vector = list()
-
         # turn into numeric vectors
         for char in phones:
-            phones_vector.append(self.ipa_to_vector.get(char, self.default_vector))
-
+            if self.allow_unknown:
+                phones_vector.append(self.ipa_to_vector.get(char, self.default_vector))
+            else:
+                if char in self.ipa_to_vector.keys():
+                    phones_vector.append(self.ipa_to_vector[char])
         if self.use_explicit_eos:
             phones_vector.append(self.ipa_to_vector["end_of_input"])
 
-        # turn into tensors
-        tensors.append(torch.LongTensor(phones_vector))
-
         # combine tensors and return
         if not return_string:
-            return torch.stack(tensors, 0)
+            return torch.LongTensor(phones_vector).unsqueeze(0)
         else:
             return phones + "#"
 
     def phones_to_tensor(self, phones):
-        phones = phones.replace("_SIL_", "~")
-        phones = phones.replace(" ", "")
+        phones = phones.replace("_p:_", "~")
+        phones_with_dur = phones.split(" ")
+        phones = ""
+        for phone_with_dur in phones_with_dur:
+            phones += phone_with_dur.split("_")[0]
         phones = "+" + phones.rstrip("~").lstrip("~")  # the EOS will be added by the synthesis to ensure that there is always one there
         phones_vector = list()
         for char in phones:
-            phones_vector.append(self.ipa_to_vector.get(char, self.default_vector))
+            try:
+                phones_vector.append(self.ipa_to_vector[char])
+            except KeyError:
+                print("Unknown symbol produced by the aligner: {}".format(char))
         return torch.LongTensor(phones_vector).unsqueeze(0)
 
+    def phones_and_dur_to_tensor(self, phones, melspec):
+        phones = phones.replace("_p:_", "~")
+        if not phones[0] == "~":
+            phones = "~_0.0001 " + phones
+        if not phones.split()[-1][0] == "~":
+            phones = phones + " ~_0.0001"
+        phones_with_dur = phones.split(" ")
+        phones = ""
+        durs = []
+        for phone_with_dur in phones_with_dur:
+            phone, _, dur = phone_with_dur.partition("_")
+            phones += phone
+            durs.append(float(dur))
+        phones = "+" + phones.rstrip("~").lstrip("~")  # the EOS will be added by the synthesis to ensure that there is always one there
+        phones_vector = list()
+        for char in phones:
+            try:
+                phones_vector.append(self.ipa_to_vector[char])
+            except KeyError:
+                print("Unknown symbol produced by the aligner: {}".format(char))
 
-def phonemize_train_text_no_silences_no_eos_blizzard():
-    root = "/mount/resources/speech/corpora/Blizzard2021/spanish_blizzard_release_2021_v2/hub"
-    tf = TextFrontend(language="es", use_word_boundaries=True)
-    path_to_transcript = dict()
-    with open(os.path.join(root, "train_text.txt"), "r", encoding="utf8") as file:
-        lookup = file.read()
-    for line in lookup.split("\n"):
-        if line.strip() != "":
-            norm_transcript = line.split("\t")[1]
-            file_handle = line.split("\t")[0]
-            path_to_transcript[file_handle] = tf.string_to_tensor(norm_transcript, view=False, return_string=True)
-    resulting_file_content = ""
-    for key in path_to_transcript:
-        resulting_file_content += key + "\t" + path_to_transcript[key] + "\n"
-    resulting_file_content = resulting_file_content[:-2]  # remove the final linebreak
-    with open(os.path.join(root, "train_phones.txt"), "w", encoding="utf8") as file:
-        file.write(resulting_file_content.replace("~", "").replace("+", ""))
-    print("Done with Blizzard")
+        x = len(melspec) / sum(durs)
+        frames = [round(dur * x) for dur in durs]
+        diff = len(melspec) - sum(frames)
 
+        # if number of frames doesn't match, adjust long durations first
+        if diff > 0:
+            sorted_frames = numpy.argsort(frames)[::-1]
+            for i in range(diff):
+                idx = sorted_frames[i]
+                frames[idx] += 1
+        elif diff < 0:
+            sorted_frames = numpy.argsort(frames)[::-1]
+            for i in range(abs(diff)):
+                idx = sorted_frames[i]
+                frames[idx] -= 1
+        assert sum(frames) == len(melspec), "Number of calculated frames does not match number of spectrogram frames"
 
-def phonemize_train_text_no_silences_no_eos_big():
-    root = "/mount/resources/speech/corpora/Spanish-100hrs/tux-100h/valid"
-    tf = TextFrontend(language="es", use_word_boundaries=True)
-    path_to_transcript = dict()
-    with open(os.path.join(root, "metadata.csv"), "r", encoding="utf8") as file:
-        lookup = file.read()
-    for line in lookup.split("\n"):
-        if line.strip() != "":
-            norm_transcript = line.split("|")[2]
-            file_handle = line.split("|")[0]
-            path_to_transcript[file_handle] = tf.string_to_tensor(norm_transcript, view=False, return_string=True)
-            resulting_file_content = ""
-            for key in path_to_transcript:
-                resulting_file_content += key + "\t" + path_to_transcript[key] + "\n"
-            resulting_file_content = resulting_file_content[:-2]  # remove the final linebreak
-            with open(os.path.join(root, "train_phones.txt"), "w", encoding="utf8") as file:
-                file.write(resulting_file_content.replace("~", "").replace("+", ""))
-    print("Done with Big")
+        return torch.LongTensor(phones_vector).unsqueeze(0), torch.LongTensor(frames)
 
 
 if __name__ == '__main__':
+    import os
+
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
     # test a Spanish utterance
-    tfr_de = TextFrontend(language="es", use_panphon_vectors=False, use_word_boundaries=False, use_explicit_eos=False,
-                          path_to_panphon_table="ipa_vector_lookup.csv")
-    print(tfr_de.string_to_tensor("Desde los sesudos editoriales de 'The Washington Post' al Palacio del Elseo.", view=True))
+    tfr_de = TextFrontend(language="es", use_word_boundaries=True, use_explicit_eos=False, use_codeswitching=False,
+                          path_to_phoneme_list="ipa_list.txt")
+    print(tfr_de.string_to_tensor(
+        "Es una película de robots donde trabaja una niña que se llama Megan Fox.",
+        view=True))
 
     # test a Spanish utterance with code switching
-    tfr_de = TextFrontend(language="es", use_panphon_vectors=False, use_word_boundaries=False, use_explicit_eos=False, use_codeswitching=True,
-                          path_to_panphon_table="ipa_vector_lookup.csv")
-    print(tfr_de.string_to_tensor("Desde los sesudos editoriales de 'The Washington Post' al Palacio del Elseo.", view=True))
+    tfr_de = TextFrontend(language="es", use_word_boundaries=True, use_explicit_eos=False, use_codeswitching=True,
+                          path_to_phoneme_list="ipa_list.txt")
+    print(tfr_de.string_to_tensor(
+        "Es una película de robots donde trabaja una niña que se llama Megan Fox.",
+        view=True))
