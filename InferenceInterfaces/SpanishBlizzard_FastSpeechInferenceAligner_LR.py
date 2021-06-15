@@ -35,9 +35,9 @@ class SpanishBlizzard_FastSpeechInferenceAligner(torch.nn.Module):
             ax[0].plot(wave.cpu().numpy())
             lbd.specshow(mel.cpu().numpy(), ax=ax[1], sr=16000, cmap='GnBu', y_axis='mel', x_axis='time',
                          hop_length=256)
-            ax[0].yaxis.set_visible(False)
-            ax[1].yaxis.set_visible(False)
             plt.subplots_adjust(left=0.05, bottom=0.1, right=0.95, top=.9, wspace=0.0, hspace=0.0)
+            ax[1].set(title=self.text2phone.string_to_tensor(text=text ,return_string=True))
+            ax[1].label_outer()
             plt.show()
 
         return wave
