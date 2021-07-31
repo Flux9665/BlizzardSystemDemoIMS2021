@@ -29,7 +29,7 @@ class SpanishBlizzard_FastSpeechInferenceAligner(torch.nn.Module):
             mel, durations, pitch, energy = self.phone2mel(phones, speaker_embedding=self.speaker_embedding, return_duration_pitch_energy=True)
             mel = mel.transpose(0, 1)
             wave = self.mel2wav(mel.unsqueeze(0)).squeeze(0).squeeze(0)
-        if view:
+        if view and len(text) < 40:
             import matplotlib.pyplot as plt
             import librosa.display as lbd
             from Utility.utils import cumsum_durations
@@ -50,8 +50,19 @@ class SpanishBlizzard_FastSpeechInferenceAligner(torch.nn.Module):
             ax[1].set_xticks(label_positions, minor=False)
             ax[1].set_xticklabels(self.text2phone.string_to_tensor(text=text, return_string=True))
             ax[0].set_title(text)
-            # plt.subplots_adjust(left=0.05, bottom=0.1, right=0.95, top=.9, wspace=0.0, hspace=0.0)
+            plt.subplots_adjust(left=0.05, bottom=0.1, right=0.95, top=.9, wspace=0.0, hspace=0.0)
             plt.savefig("example.pdf")
+            plt.show()
+        elif view:
+            import matplotlib.pyplot as plt
+            import librosa.display as lbd
+            fig, ax = plt.subplots(nrows=2, ncols=1)
+            ax[0].plot(wave.cpu().numpy())
+            lbd.specshow(mel.cpu().numpy(), ax=ax[1], sr=16000, cmap='GnBu', y_axis='mel', x_axis='time',
+                         hop_length=256)
+            plt.subplots_adjust(left=0.05, bottom=0.1, right=0.95, top=.9, wspace=0.0, hspace=0.0)
+            ax[0].set(title=self.text2phone.string_to_tensor(text=text, return_string=True))
+            ax[0].label_outer()
             plt.show()
 
         return wave
