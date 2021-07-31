@@ -253,7 +253,7 @@ class TextFrontend:
         if not return_string:
             return torch.LongTensor(phones_vector).unsqueeze(0)
         else:
-            return phones + "#"
+            return phones
 
     def phones_to_tensor(self, phones):
         phones = phones.replace("_p:_", "~")
