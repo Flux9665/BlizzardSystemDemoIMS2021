@@ -48,7 +48,8 @@ class FastSpeech2(torch.nn.Module, ABC):
                  duration_predictor_dropout_rate=0.2, postnet_dropout_rate=0.5,
                  init_type="kaiming_uniform",
                  init_enc_alpha=1.0, init_dec_alpha=1.0, use_masking=False,
-                 use_weighted_masking=True, lang='en'):
+                 use_weighted_masking=True, lang='en',
+                 legacy_model=False):
         super().__init__()
         self.idim = idim
         self.odim = odim
@@ -67,7 +68,7 @@ class FastSpeech2(torch.nn.Module, ABC):
                                  normalize_before=encoder_normalize_before, concat_after=encoder_concat_after,
                                  positionwise_conv_kernel_size=positionwise_conv_kernel_size,
                                  macaron_style=use_macaron_style_in_conformer,
-                                 use_cnn_module=use_cnn_in_conformer, cnn_module_kernel=conformer_enc_kernel_size)
+                                 use_cnn_module=use_cnn_in_conformer, cnn_module_kernel=conformer_enc_kernel_size, legacy_model=legacy_model)
         if self.spk_embed_dim is not None:
             self.projection = torch.nn.Linear(adim + self.spk_embed_dim, adim)
         self.duration_predictor = DurationPredictor(idim=adim, n_layers=duration_predictor_layers,
@@ -100,11 +101,11 @@ class FastSpeech2(torch.nn.Module, ABC):
                                  concat_after=decoder_concat_after,
                                  positionwise_conv_kernel_size=positionwise_conv_kernel_size,
                                  macaron_style=use_macaron_style_in_conformer, use_cnn_module=use_cnn_in_conformer,
-                                 cnn_module_kernel=conformer_dec_kernel_size)
+                                 cnn_module_kernel=conformer_dec_kernel_size, legacy_model=legacy_model)
         self.feat_out = torch.nn.Linear(adim, odim * reduction_factor)
         self.postnet = PostNet(idim=idim, odim=odim, n_layers=postnet_layers, n_chans=postnet_chans,
                                n_filts=postnet_filts, use_batch_norm=use_batch_norm,
-                               dropout_rate=postnet_dropout_rate)
+                               dropout_rate=postnet_dropout_rate, legacy_model=legacy_model)
         self.load_state_dict(
             torch.load(path_to_weights, map_location='cpu')["model"])
 
@@ -150,15 +151,23 @@ class FastSpeech2(torch.nn.Module, ABC):
         after_outs = before_outs + self.postnet(before_outs.transpose(1, 2)).transpose(1, 2)
         return before_outs, after_outs, d_outs, p_outs, e_outs
 
-    def forward(self, text, speaker_embedding=None, alpha=1.0):
+    def forward(self, text, speaker_embedding=None, alpha=1.0, return_duration_pitch_energy=False):
         self.eval()
         x = text
         ilens = torch.tensor([x.shape[0]], dtype=torch.long, device=x.device)
         xs = x.unsqueeze(0)
         if speaker_embedding is not None:
             speaker_embedding = speaker_embedding.unsqueeze(0)
-        _, outs, *_ = self._forward(xs, ilens, None, speaker_embeddings=speaker_embedding, is_inference=True, alpha=alpha)
-        return outs[0]
+        before_outs, after_outs, d_outs, pitch_predictions, energy_predictions = self._forward(xs,
+                                                                                               ilens,
+                                                                                               None,
+                                                                                               speaker_embeddings=speaker_embedding,
+                                                                                               is_inference=True,
+                                                                                               alpha=alpha)
+        self.train()
+        if return_duration_pitch_energy:
+            return after_outs[0], d_outs[0], pitch_predictions[0], energy_predictions[0]
+        return after_outs[0]
 
     def _integrate_with_spk_embed(self, hs, speaker_embeddings):
         speaker_embeddings = F.normalize(speaker_embeddings).unsqueeze(1).expand(-1, hs.size(1), -1)
