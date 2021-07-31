@@ -51,7 +51,7 @@ class SpanishBlizzard_FastSpeechInferenceAligner(torch.nn.Module):
             ax[1].set_xticklabels(self.text2phone.string_to_tensor(text=text, return_string=True))
             ax[0].set_title(text)
             plt.subplots_adjust(left=0.05, bottom=0.1, right=0.95, top=.9, wspace=0.0, hspace=0.0)
-            plt.savefig("example.pdf")
+            plt.savefig("/content/example.pdf")
             plt.show()
         elif view:
             import matplotlib.pyplot as plt
