@@ -49,7 +49,7 @@ class FastSpeech2(torch.nn.Module, ABC):
                  init_type="kaiming_uniform",
                  init_enc_alpha=1.0, init_dec_alpha=1.0, use_masking=False,
                  use_weighted_masking=True, lang='en',
-                 legacy_model=False):
+                 legacy_model=True):
         super().__init__()
         self.idim = idim
         self.odim = odim
